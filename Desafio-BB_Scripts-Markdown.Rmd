@@ -1,0 +1,271 @@
+
+---
+title: "DESAFIO BB"
+author: "Ellaynne Christine R. de Moraes Sousa"
+date: "1 de setembro de 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Objetivo
+
+Implementar modelos preditos que preveem se um individuo ganha mais de (US) $50.000.
+
+O DataSet analisado mostra a renda dos indivíduos usando dados coletados do Censo de 1994 nos EUA. Deverá ser escolhido o melhor algoritmo para melhor modelar os dados.
+
+# --------------------------------------------------------------------------------------------------
+
+```{r include=FALSE}
+library('digest')
+library('splitstackshape')
+library("ggplot2")
+library("corrplot")
+library("plyr")
+
+diretorioPadrao <- "D:/TestesR/DesafioBB/"
+arquivoTrain <- paste0(diretorioPadrao,"census.csv")
+
+train <- NULL
+```
+
+##### Importação do arquivo (valores passados para o parêmetro na.strings devem ser interpretados como NA)
+
+```{r}
+train <- read.csv(arquivoTrain, sep = "," , na.strings = c('NA', '', 'NULL') )
+```
+
+###### Análise dos dados.
+
+```{r}
+summary(train)
+
+
+# É possível ver que a variável Capital.gain possui outliers
+boxplot(train)
+```
+
+
+```{r}
+# Como havia apenas uma linha com valores NA, esta foi omitida
+train <- na.omit(train)
+
+```
+
+
+Na variável "Sex", havia uma única ocorrência do valor " Mal". Para não tratar esse registro como Outlier, assumiu-se que deveria se referenciar ao sexo Masculino.
+```{r}
+levels(train$sex)
+revalue(train$sex, c(" Mal" = " Male")) -> train$sex
+
+```
+
+```{r include=FALSE}
+train_numerics <- NULL
+train_numerics$age <- train$age
+train_numerics$workclass <- as.numeric(train$workclass)
+train_numerics$education_level <- as.numeric(train$education_level)
+train_numerics$education.num <- train$education.num
+train_numerics$marital <- as.numeric(train$marital.status)
+train_numerics$occupation <- as.numeric(train$occupation)
+train_numerics$relationship <- as.numeric(train$relationship)
+train_numerics$race <- as.numeric(train$race)
+train_numerics$sex <- as.numeric(train$sex)
+train_numerics$hours.work <- as.numeric(train$hours.per.week)
+train_numerics$country <- as.numeric(train$native.country)
+train_numerics$income <- as.numeric(train$income)
+train_numerics <- na.omit(data.frame(train_numerics))
+
+```
+
+Gráfico de correlação entre as variáveis, no qual pode-se visualizar que as variáveis que mais se relacionam com a "Income" são: Sex, HoursWork, Education_num e Age
+
+```{r}
+corrplot(cor(train_numerics), main="\n\nCorrelação entre variáveis", method="circle", type="lower", order="hclust", addCoef.col = "black")
+```
+
+Criação da variável Target (do tipo factor, já que os modelos serão do tipo Supervisionado Classificatório) a partir da variável Income
+
+```{r}
+train[train$income != ">50K", "target"] <- 0
+train[train$income == ">50K", "target"] <- 1
+train$target <- as.factor(train$target)
+
+# A classe Target está desbalanceada, isto é, há mais amostras para indivíduos com renda menor ou igual a 50k e poucas amostras para indivíduos com renda maior que 50k
+summary(train$target)
+```
+
+
+## Criação dos modelos preditivos utilizando o pacote H2o.
+
+```{r include=FALSE}
+library("h2o")
+h2o.init()
+
+dataTrain <- NULL
+dataTrain <- as.h2o(train)
+
+options(OutDec= ".") 
+```
+
+Divisão do dataset em Treinamento, Validação e Teste (para os modelos que não irão utilizar o cross-validation)
+
+```{r}
+data_split <- h2o.splitFrame(data = dataTrain, ratios = c(0.7,0.2), seed = 1234)
+
+dados.treino <- data_split[[1]]
+dados.validacao <- data_split[[2]]
+dados.teste <- data_split[[3]]
+```
+
+Definição da variável Target (Y) e do vetor de variáveis independentes (X) a serem passadas para os algoritmos de treinamento
+```{r}
+# Coluna que se deseja prever
+myY <- "target"
+
+# Colunas que deve ser ignoradas pelo algoritmo
+ignored_columns <- c("target", "income", "workclass", "capital.loss", "race")
+myX <- setdiff(setdiff(names(dataTrain), myY), ignored_columns)
+```
+
+## 1º modelo: GBM (sem cross-validation)
+```{r}
+
+# O GBM é um algoritmo de aprendizagem supervisionada baseado em árvores de decisão utilizado em problemas de classificação e regressão
+
+gbm <- h2o.gbm(x = myX,
+               y = myY,
+               model_id = "gbm",
+               training_frame    = dados.treino,
+               validation_frame  = dados.validacao,
+               balance_classes = TRUE) #balanceamento de classes
+```
+
+## Desempenho do modelo:
+
+### Logarithmic Loss
+```{r}
+h2o.logloss(gbm)
+```
+
+```{r}
+plot(gbm@model$scoring_history$validation_logloss)
+```
+
+### Métricas da etapa de validação (Acurácia)
+```{r}
+gbm@model$validation_metrics
+```
+
+### AUC (Area under the Curve ROC)
+```{r}
+h2o.auc(h2o.performance(gbm))
+```
+
+## 2º Modelo: GBM com cross-validation
+```{r}
+
+gbm_cross_validation <- h2o.gbm(x = myX,
+               y = myY,
+               model_id = "gbm_cross_validation",
+               training_frame    = dados.treino,
+               nfolds            = 5,
+               max_depth         = 10,
+               balance_classes = TRUE)  #balanceamento de classes
+```
+
+## Desempenho do modelo:
+
+### Logarithmic Loss
+```{r}
+h2o.logloss(h2o.logloss(gbm_cross_validation))
+```
+
+```{r}
+plot(gbm_cross_validation@model$scoring_history$training_logloss)
+```
+### Métricas da etapa de validação (Acurácia, AUC, Log Loss)
+```{r}
+gbm_cross_validation@model$cross_validation_metrics_summary
+```
+
+## 3º Modelo: DEEP LEARNING sem cross validation
+
+```{r}
+# O Deep Learning é baseado em Redes Neurais Artificiais (RNA), que são algoritmos inspirados nas ligações neurológicas que constituem o cérebro dos seres vivos.
+
+deep_learning <- h2o.deeplearning(
+  x = myX,
+  y = myY,
+  model_id = "deep_learning",
+  training_frame = dados.treino,
+  validation_frame = dados.validacao,
+  epoch = 12,  #iterações de conexões
+  seed = 1234
+)
+```
+## Desempenho do modelo:
+
+### Logarithmic Loss
+```{r}
+h2o.logloss(deep_learning)
+```
+
+```{r}
+plot(deep_learning@model$scoring_history$validation_logloss)
+```
+
+### Métricas da etapa de validação (Acurácia, AUC, Log Loss)
+```{r}
+deep_learning@model$validation_metrics
+```
+
+```{r}
+h2o.auc(h2o.performance(deep_learning))
+```
+
+## 4º Modelo:  DEEP LEARNING com cross validation = 5
+
+```{r}
+deep_learning_cross_validation <- h2o.deeplearning(
+  x = myX,
+  y = myY,
+  model_id = "deep_learning_cross_validation",
+  training_frame = dataTrain,
+  nfolds = 5
+  #epoch = 12,
+  #hidden = c(5,5),
+  #activation  = "Rectifier",
+  #seed = 1234
+)
+```
+## Desempenho do modelo:
+
+### Logarithmic Loss
+```{r}
+h2o.logloss(deep_learning_cross_validation)
+```
+
+```{r}
+plot(deep_learning_cross_validation@model$scoring_history$training_logloss)
+```
+
+### Métricas da etapa de validação (Acurácia, AUC, Log Loss)
+```{r}
+deep_learning_cross_validation@model$cross_validation_metrics_summary 
+```
+
+# --------------------------------------------------------------------------------------------------
+##                                                Conclusão
+
+  Muitos testes foram realizados até chegar nos algoritmos apresentados: foram passadas diferentes combinações de variáveis independentes a serem consideradas pelos algoritmos e diferentes valores de parâmetros de configuração para a construção dos modelos.
+  
+  Os modelos encontrados podem ser considerados bons, já que as principais métricas de avaliação para machine learning tiveram resultados satisfatórios, tais como: 
+  Acurácia, que calcula a proximidade dos valores obtidos experimentalmente e dos valores reais esperados; Sensibilidade, que é a capacidade de identificar corretamente as classes positivas; Especificidade, que identifica corretamente as classes negativas; Logarithmic loss, que consiste em punir classificações erradas e de alta confiança feitas pelo modelo.
+  
+  Dentre as soluções apresentadas, os modelos 1 (gbm) e 3 (deep_leaning) possuem os melhores valores (e bem próximos) para as métricas que serão consideradas nesse trabalho (Acurácia e Log Loss), sendo o primeiro (gbm) o que representará a solução final escolhida para o desafio proposto.
+  
+  
+  
